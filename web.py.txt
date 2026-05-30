@@ -1,0 +1,243 @@
+from flask import Flask, render_template, request, redirect, url_for
+import joblib
+import mysql.connector
+import numpy as np
+import pandas as pd
+from werkzeug.security import generate_password_hash, check_password_hash
+
+
+app = Flask(__name__)
+model=joblib.load(r'C:\Users\maha\OneDrive\Desktop\price\stock_price_model.pkl')
+
+connection = mysql.connector.connect(
+    host='localhost',
+    user='root',  # Replace with your MySQL username
+    password='root',  # Replace with your MySQL password
+    database='user_registration'  # Replace with your database name
+)
+
+@app.route('/')
+def home():
+    return render_template('home.html')
+
+@app.route("/login", methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form["username"]
+        pwd = request.form["password"]
+
+        # Check if the login is for the admin (using hardcoded credentials)
+        if username == 'admin' and pwd == 'price@stock123':
+            return redirect(url_for('admin_dashboard'))
+
+        # Otherwise, check the user credentials from the database
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+        user = cursor.fetchone()
+
+        if not user:
+            return render_template('login.html', msg="Invalid Username")
+        elif not check_password_hash(user[2], pwd):  # user[2] is the password column (hashed)
+            return render_template('login.html', msg="Invalid Password")
+        else:
+            return redirect(url_for('input'))  # Regular users are redirected to the input page
+
+    return render_template('login.html')
+
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        try:
+            username = request.form['username']
+            password = request.form['password']
+            email = request.form['email']
+            hashed_password = generate_password_hash(password)
+            cursor = connection.cursor()
+            query = "INSERT INTO users (username, password, email) VALUES (%s, %s, %s)"
+            cursor.execute(query, (username, hashed_password, email))
+            connection.commit()
+            cursor.close()
+
+            print("User registered successfully!")
+            return redirect('/login')
+        except Exception as e:
+            print(f"Error: {e}")
+            return "Username/Email id already existing, try using another", 500
+
+    return render_template('register.html')
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        # Get form data
+        day = int(request.form['day'])
+        month = int(request.form['month'])
+        year = int(request.form['year'])
+        volume = int(request.form['volume'])
+        min_price = float(request.form['min_price'])
+        max_price = float(request.form['max_price'])
+
+        # Prepare input for the model
+        user_input = pd.DataFrame({'Day': [day], 'Month': [month], 'Year': [year], 'Volume': [volume]})
+        
+        # Predict the price
+        predicted_close = model.predict(user_input)
+        predicted_price = predicted_close[0]
+
+        # Generate suggestion
+        if min_price <= predicted_price <= max_price:
+            suggestion = f"The predicted price of {predicted_price:.2f} is within your expected range."
+        elif predicted_price < min_price:
+            suggestion = f"The predicted price of {predicted_price:.2f} is below your expected minimum price."
+        else:
+            suggestion = f"The predicted price of {predicted_price:.2f} is above your expected maximum price."
+
+        return render_template('result.html', predicted_price=predicted_price, suggestion=suggestion)
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@app.route('/input', methods=['GET', 'POST'])
+def input():
+    if request.method == 'POST':
+        try:
+            # Get user inputs
+            day = int(request.form['day'])
+            month = int(request.form['month'])
+            year = int(request.form['year'])
+            volume = int(request.form['volume'])
+            min_price = float(request.form['min_price'])
+            max_price = float(request.form['max_price'])
+
+            # Check for valid price range
+            if min_price >= max_price:
+                raise ValueError("Minimum price must be less than the maximum price.")
+
+            # Prepare input data for prediction
+            user_input = pd.DataFrame({
+                'Day': [day],
+                'Month': [month],
+                'Year': [year],
+                'Volume': [volume]
+            })
+
+            # Predict the Close price
+            predicted_price = model.predict(user_input)[0]
+
+            # Generate suggestion based on predicted price and user's expected range
+            if min_price <= predicted_price <= max_price:
+                suggestion = (
+                    f"The predicted price of {predicted_price:.2f} is within your expected price range "
+                    f"of {min_price:.2f} to {max_price:.2f}. This suggests the stock is moving as per your expectations. "
+                    f"It might be a good idea to hold your position or buy cautiously."
+                )
+            elif predicted_price < min_price:
+                suggestion = (
+                    f"The predicted price of {predicted_price:.2f} is below your expected minimum price of {min_price:.2f}. "
+                    f"Consider holding off on buying, as the stock might not meet your target price."
+                )
+            else:  # predicted_price > max_price
+                suggestion = (
+                    f"The predicted price of {predicted_price:.2f} is above your expected maximum price of {max_price:.2f}. "
+                    f"This could indicate an overvalued stock. Consider selling or waiting for a dip."
+                )
+
+            # Render the result page
+            return render_template(
+                'result.html',
+                predicted_price=round(predicted_price, 2),
+                suggestion=suggestion,
+                min_price=min_price,
+                max_price=max_price
+            )
+
+        except ValueError as e:
+            return f"Invalid input: {e}"
+
+    return render_template('input.html')
+
+
+@app.route('/admin_dashboard')
+def admin_dashboard():
+    # Fetch all users from the database
+    cursor = connection.cursor()
+    cursor.execute("SELECT * FROM users")  # Query to get all users
+    users = cursor.fetchall()  # Fetch all the rows of data
+    cursor.close()
+
+    # Return the dashboard template and pass the users list to it
+    return render_template('admin_dashboard.html', users=users)
+
+
+
+
+@app.route('/delete_user/<int:user_id>', methods=['GET'])
+def delete_user(user_id):
+    try:
+        cursor = connection.cursor()
+        query = "DELETE FROM users WHERE id=%s"
+        cursor.execute(query, (user_id,))
+        connection.commit()
+        cursor.close()
+        return redirect(url_for('admin_dashboard'))
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@app.route('/delete_user/<int:user_id>', methods=['GET', 'POST'])
+def delete_user_from_db(user_id):
+    try:
+        # Connect to the database and delete the user by ID
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        connection.commit()
+        cursor.close()
+
+        print(f"User with ID {user_id} deleted successfully.")
+        return redirect(url_for('admin_dashboard'))  # Redirect back to the admin dashboard
+    except Exception as e:
+        print(f"Error deleting user: {e}")
+        return "An error occurred while deleting the user.", 500
+
+    
+@app.route('/logout')
+def logout():
+    # Redirect back to the login page
+    return redirect(url_for('login'))
+
+
+@app.route('/about')
+def about():
+    return render_template('about.html')
+
+
+@app.route('/contact', methods=['GET', 'POST'])
+def contact():
+    success_message = None  # Initialize the success message variable
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        message = request.form['message']
+
+        # Compose the email
+        msg = Message("New Contact Form Submission", recipients=["pricepulse1@gmail.com"])
+        msg.body = f"Name: {name}\nEmail: {email}\nMessage: {message}"
+
+        try:
+            mail.send(msg)  # Send the email
+            success_message = "Your message has been sent successfully. We will get back to you soon!"  # Set success message
+        except:
+            success_message = "There was an error sending your message. Please try again."  # Set error message
+
+    return render_template('contact.html', success_message=success_message)
+
+
+@app.route('/result')
+def result():
+    return render_template('result.html')
+
+if __name__ == '__main__':
+    app.run(debug=True)
